@@ -11,7 +11,7 @@ app.use(express.json());
 // === CONFIG ===
 const SHEET_ID = process.env.SHEET_ID;
 const GOOGLE_SERVICE_KEY = process.env.GOOGLE_SERVICE_KEY;
-const SHEET_NAME = "site visits"; // Sheet/tab name
+const SHEET_NAME = "site visits"; // tab name
 
 // === AUTH ===
 const getSheets = async () => {
@@ -22,7 +22,7 @@ const getSheets = async () => {
   return google.sheets({ version: "v4", auth });
 };
 
-// === Read Data ===
+// === READ SHEET ===
 const getRows = async () => {
   const sheets = await getSheets();
   const result = await sheets.spreadsheets.values.get({
@@ -37,14 +37,18 @@ const getRows = async () => {
   );
 };
 
-// === Date Parser ===
+// === DATE PARSER ===
 const parseDate = (timestamp) => {
   if (!timestamp) return null;
-  const [d, m, y] = timestamp.split(/[ /]/);
-  return new Date(`${y}-${m}-${d}`);
+  const parts = timestamp.split(/[ /:]/);
+  if (parts.length < 3) return null;
+  let [d, m, y] = parts;
+  if (y.length === 2) y = `20${y}`;
+  const parsed = new Date(`${y}-${m}-${d}`);
+  return isNaN(parsed.getTime()) ? null : parsed;
 };
 
-// === HELPERS ===
+// === PERIOD FILTER ===
 const filterByPeriod = (data, period) => {
   const now = new Date();
   const oneWeekAgo = new Date();
@@ -53,7 +57,6 @@ const filterByPeriod = (data, period) => {
   return data.filter((r) => {
     const d = parseDate(r.Timestamp);
     if (!d) return false;
-
     switch (period) {
       case "today":
         return (
@@ -76,7 +79,7 @@ app.get("/health", (req, res) => {
   res.send("✅ Aiikya Village Entry API running fine!");
 });
 
-// ✅ VISITORS (today)
+// ✅ VISITORS (TODAY)
 app.get("/visitors", async (req, res) => {
   try {
     const data = await getRows();
@@ -103,20 +106,69 @@ app.get("/weekly", async (req, res) => {
 // ✅ MONTHLY VISITORS
 app.get("/monthly", async (req, res) => {
   try {
-    const { month } = req.query; // optional custom month YYYY-MM
+    const { month } = req.query; // e.g. 2025-11
     const data = await getRows();
-
     const results = data.filter((r) => {
       const d = parseDate(r.Timestamp);
       if (!d) return false;
       const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-      return month ? iso === month : iso === `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, "0")}`;
+      return month
+        ? iso === month
+        : iso === `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, "0")}`;
     });
-
     res.json({ month: month || "current", total_visitors: results.length });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to get monthly visitors" });
+  }
+});
+
+// ✅ MONTHLY SOURCE & HANDLER BREAKDOWN
+app.get("/monthlysources", async (req, res) => {
+  try {
+    const { month } = req.query;
+    if (!month) return res.status(400).json({ error: "Month (YYYY-MM) required" });
+
+    const data = await getRows();
+    const filtered = data.filter((r) => {
+      const d = parseDate(r.Timestamp);
+      if (!d) return false;
+      const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      return iso === month;
+    });
+
+    const sourceKey = Object.keys(filtered[0] || {}).find(
+      (k) => k.trim().toLowerCase() === "how did you come to know about us".toLowerCase()
+    );
+
+    const handlerKey = Object.keys(filtered[0] || {}).find(
+      (k) => k.trim().toLowerCase() === "site visit handled by".toLowerCase()
+    );
+
+    const salesKey = Object.keys(filtered[0] || {}).find(
+      (k) => k.trim().toLowerCase() === "sales person".toLowerCase()
+    );
+
+    const sourceCount = {};
+    const handlerCount = {};
+
+    filtered.forEach((r) => {
+      const src = (r[sourceKey] || "Unknown").trim();
+      if (src) sourceCount[src] = (sourceCount[src] || 0) + 1;
+
+      const handler = `${r[handlerKey] || ""} ${r[salesKey] || ""}`.trim() || "Unassigned";
+      handlerCount[handler] = (handlerCount[handler] || 0) + 1;
+    });
+
+    res.json({
+      month,
+      total_visitors: filtered.length,
+      sources: Object.entries(sourceCount).map(([label, count]) => ({ label, count })),
+      handlers: Object.entries(handlerCount).map(([name, count]) => ({ name, count })),
+    });
+  } catch (e) {
+    console.error("❌ Error in /monthlysources:", e);
+    res.status(500).json({ error: "Failed to get monthly source analysis" });
   }
 });
 
@@ -155,7 +207,6 @@ app.get("/socialmedia", async (req, res) => {
       return monthList.includes(monthIso) && src.includes(source.toLowerCase());
     });
 
-    // Handlers
     const handlerCount = {};
     const incomeBreakdown = {};
     const remarks = [];
@@ -190,7 +241,7 @@ app.get("/socialmedia", async (req, res) => {
   }
 });
 
-// ✅ ANALYSIS (All Insights)
+// ✅ OVERALL ANALYSIS
 app.get("/analysis", async (req, res) => {
   try {
     const data = await getRows();
@@ -228,7 +279,7 @@ app.get("/analysis", async (req, res) => {
 
 // ✅ ROOT
 app.get("/", (req, res) => {
-  res.send("🌿 Aiikya Village Entry API is live. Endpoints: /health, /visitors, /weekly, /monthly, /salesperson, /socialmedia, /analysis");
+  res.send("🌿 Aiikya Village Entry API live. Endpoints: /health, /visitors, /weekly, /monthly, /monthlysources, /salesperson, /socialmedia, /analysis");
 });
 
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
