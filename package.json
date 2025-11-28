@@ -1,11 +1,11 @@
 {
   "name": "village-entry-api",
   "version": "1.0.0",
-  "description": "Village Entry Form analytics API for Google Sheets (with social media insights, sentiment analysis, and performance metrics)",
+  "description": "Village Entry Analytics API for Aiikya Village, Sarjapur.",
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "node --experimental-modules server.js"
+    "start": "node index.js"
   },
   "dependencies": {
     "express": "^4.18.2",
@@ -13,6 +13,6 @@
     "cors": "^2.8.5"
   },
   "engines": {
-    "node": "20.x"
+    "node": ">=18"
   }
 }
