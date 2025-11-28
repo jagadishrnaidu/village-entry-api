@@ -19,20 +19,31 @@ const auth = new google.auth.GoogleAuth({
 });
 const sheets = google.sheets({ version: "v4", auth });
 
-// === Helper ===
+// === Helpers ===
 async function readSheet() {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
-    range: `${SHEET_NAME}!A:T` // A to T covers all columns
+    range: `${SHEET_NAME}!A:T`
   });
-  const [headers, ...rows] = res.data.values;
+  const [headers, ...rows] = res.data.values || [];
   return { headers, rows };
 }
 
 function toDate(value) {
-  const parts = value?.split(/[/ :]/);
-  if (!parts || parts.length < 3) return null;
-  return new Date(parts[2], parts[1] - 1, parts[0]);
+  if (!value) return null;
+  const parts = value.split(/[\/ :]/);
+  if (parts.length < 3) return null;
+  const [d, m, y] = parts;
+  return new Date(`${y}-${m}-${d}`);
+}
+
+// === Simple Sentiment Analyzer ===
+function getSentiment(text) {
+  const t = text.toLowerCase();
+  if (!t) return "Neutral";
+  if (t.includes("interested") || t.includes("positive") || t.includes("good") || t.includes("booked")) return "Positive";
+  if (t.includes("follow") || t.includes("call") || t.includes("pending") || t.includes("waiting")) return "Follow-up Required";
+  return "Neutral";
 }
 
 // === Endpoints ===
@@ -54,7 +65,7 @@ app.get("/visitors", async (req, res) => {
   }
 });
 
-// Weekly / monthly / custom period
+// Period (custom days)
 app.get("/period", async (req, res) => {
   try {
     const days = parseInt(req.query.days || "7");
@@ -78,11 +89,11 @@ app.get("/salesperson", async (req, res) => {
     const { name } = req.query;
     if (!name) return res.status(400).json({ error: "Missing name" });
     const { rows } = await readSheet();
-    const spCol = 17; // Sales person
-    const siteVisitBy = 16; // Site Visit handled by
+    const spCol = 17;
+    const siteVisitCol = 16;
     const count = rows.filter(r =>
       (r[spCol] && r[spCol].toLowerCase().includes(name.toLowerCase())) ||
-      (r[siteVisitBy] && r[siteVisitBy].toLowerCase().includes(name.toLowerCase()))
+      (r[siteVisitCol] && r[siteVisitCol].toLowerCase().includes(name.toLowerCase()))
     ).length;
     res.json({ salesperson: name, customers: count });
   } catch (e) {
@@ -101,17 +112,14 @@ app.get("/compare", async (req, res) => {
       stats[sp] = (stats[sp] || 0) + 1;
     });
     res.json({
-      comparison: Object.entries(stats).map(([salesperson, customers]) => ({
-        salesperson,
-        customers
-      }))
+      comparison: Object.entries(stats).map(([salesperson, customers]) => ({ salesperson, customers }))
     });
   } catch (e) {
     res.status(500).json({ error: "Failed to compare salespeople" });
   }
 });
 
-// Source analysis
+// Sources
 app.get("/sources", async (req, res) => {
   try {
     const { rows } = await readSheet();
@@ -159,7 +167,7 @@ app.get("/configurations", async (req, res) => {
   }
 });
 
-// Industry / Income
+// Industries
 app.get("/industries", async (req, res) => {
   try {
     const { rows } = await readSheet();
@@ -175,6 +183,7 @@ app.get("/industries", async (req, res) => {
   }
 });
 
+// Income
 app.get("/income", async (req, res) => {
   try {
     const { rows } = await readSheet();
@@ -190,7 +199,7 @@ app.get("/income", async (req, res) => {
   }
 });
 
-// Remarks & Follow-up
+// Remarks with sentiment
 app.get("/remarks", async (req, res) => {
   try {
     const { rows } = await readSheet();
@@ -199,10 +208,16 @@ app.get("/remarks", async (req, res) => {
       .map(r => ({
         name: r[2],
         siteVisitRemarks: r[visitCol] || "",
-        followUp: r[followUpCol] || ""
+        followUp: r[followUpCol] || "",
+        sentiment: getSentiment(`${r[visitCol]} ${r[followUpCol]}`)
       }))
       .filter(r => r.siteVisitRemarks || r.followUp);
-    res.json({ remarks });
+    const summary = {
+      Positive: remarks.filter(r => r.sentiment === "Positive").length,
+      "Follow-up Required": remarks.filter(r => r.sentiment === "Follow-up Required").length,
+      Neutral: remarks.filter(r => r.sentiment === "Neutral").length
+    };
+    res.json({ summary, remarks });
   } catch (e) {
     res.status(500).json({ error: "Failed to get remarks" });
   }
@@ -212,17 +227,18 @@ app.get("/remarks", async (req, res) => {
 app.get("/cross", async (req, res) => {
   try {
     const { rows } = await readSheet();
-    const indCol = 12, incCol = 13, cfgCol = 10;
+    const indCol = 12, incCol = 13, cfgCol = 10, reqCol = 6;
     const results = {};
     rows.forEach(r => {
       const industry = r[indCol] || "Unknown";
       const income = r[incCol] || "Unknown";
       const config = r[cfgCol] || "Unknown";
-      const key = `${industry}_${income}_${config}`;
+      const req = r[reqCol] || "Unknown";
+      const key = `${industry}_${income}_${config}_${req}`;
       results[key] = (results[key] || 0) + 1;
     });
     res.json({
-      message: "Cross-analysis across industry, income, and configuration",
+      message: "Cross-analysis across industry, income, configuration, and requirement",
       breakdown: Object.entries(results).map(([key, count]) => ({ key, count }))
     });
   } catch (e) {
@@ -230,16 +246,16 @@ app.get("/cross", async (req, res) => {
   }
 });
 
-// Full analytics
+// Full analytics summary
 app.get("/analysis", async (req, res) => {
   try {
     const { rows } = await readSheet();
     res.json({
       total_rows: rows.length,
-      sources: new Set(rows.map(r => r[8])),
-      configurations: new Set(rows.map(r => r[10])),
-      industries: new Set(rows.map(r => r[12])),
-      income_ranges: new Set(rows.map(r => r[13]))
+      sources: [...new Set(rows.map(r => r[8]))].filter(Boolean),
+      configurations: [...new Set(rows.map(r => r[10]))].filter(Boolean),
+      industries: [...new Set(rows.map(r => r[12]))].filter(Boolean),
+      income_ranges: [...new Set(rows.map(r => r[13]))].filter(Boolean)
     });
   } catch (e) {
     res.status(500).json({ error: "Failed full analysis" });
