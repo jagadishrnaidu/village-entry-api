@@ -117,4 +117,66 @@ app.get("/socialmedia",async(req,res)=>{
 // existing generic endpoints (period,sources,compare...) could remain here if needed
 // but are omitted for brevity—they work unchanged from v7.5
 
+// ===================
+// SOCIAL MEDIA ANALYSIS
+// ===================
+app.get("/socialmedia", async (req, res) => {
+  try {
+    const { months = "", source = "Social Media" } = req.query; // e.g. ?months=2025-10,2025-11&source=Social Media
+    const targetMonths = months.split(",").map(m => m.trim());
+    const { headers, rows } = await readSheet();
+
+    const tsIndex = findColumn(headers, "Timestamp");
+    const srcIndex = findColumn(headers, "How did you come to Know about us");
+    const handledByCol = findColumn(headers, "Site Visit handled by");
+    const salesCol = findColumn(headers, "Sales person");
+    const remarkCol = findColumn(headers, "site visit Remarks");
+    const incomeCol = findColumn(headers, "Current annual income");
+
+    const data = [];
+
+    rows.forEach(r => {
+      const ts = parseTimestamp(r[tsIndex]);
+      if (!ts || isNaN(ts)) return;
+      const iso = `${ts.getFullYear()}-${String(ts.getMonth() + 1).padStart(2, "0")}`;
+      if (!targetMonths.includes(iso)) return;
+
+      const src = (r[srcIndex] || "").toLowerCase();
+      if (!src.includes(source.toLowerCase())) return;
+
+      data.push({
+        timestamp: r[tsIndex],
+        handledBy: r[handledByCol] || "",
+        salesperson: r[salesCol] || "",
+        remark: r[remarkCol] || "",
+        income: r[incomeCol] || ""
+      });
+    });
+
+    const handlers = {};
+    const incomes = {};
+    const remarks = [];
+
+    data.forEach(d => {
+      const handlerName = `${d.handledBy} ${d.salesperson}`.trim() || "Unassigned";
+      handlers[handlerName] = (handlers[handlerName] || 0) + 1;
+      const income = d.income || "Unspecified";
+      incomes[income] = (incomes[income] || 0) + 1;
+      if (d.remark) remarks.push({ handler: handlerName, remark: d.remark });
+    });
+
+    res.json({
+      source,
+      months: targetMonths,
+      total_visitors: data.length,
+      handlers: Object.entries(handlers).map(([handler, count]) => ({ handler, count })),
+      income_breakdown: Object.entries(incomes).map(([range, count]) => ({ range, count })),
+      remarks
+    });
+  } catch (e) {
+    res.status(500).json({ error: "Failed to analyze social media visitors", details: e.message });
+  }
+});
+
+
 app.listen(PORT,()=>console.log(`🚀 Aiikya Analytics v8.0 running on port ${PORT}`));
