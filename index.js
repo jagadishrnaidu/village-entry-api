@@ -38,15 +38,26 @@ const getRows = async () => {
 };
 
 // === DATE PARSER ===
+// === Date Parser (auto-detect format and ensure valid) ===
 const parseDate = (timestamp) => {
   if (!timestamp) return null;
-  const parts = timestamp.split(/[ /:]/);
+  // Handle both "MM/DD/YYYY HH:mm:ss" and "DD/MM/YYYY HH:mm:ss"
+  const parts = timestamp.split(/[\/ :]/);
   if (parts.length < 3) return null;
-  let [d, m, y] = parts;
-  if (y.length === 2) y = `20${y}`;
-  const parsed = new Date(`${y}-${m}-${d}`);
-  return isNaN(parsed.getTime()) ? null : parsed;
+
+  const [p1, p2, p3] = parts;
+  const year = p3.length === 4 ? p3 : parts[2];
+  const month = parseInt(p1, 10);
+  const day = parseInt(p2, 10);
+
+  // If month > 12, swap order (means DD/MM/YYYY)
+  const finalMonth = month > 12 ? day : month;
+  const finalDay = month > 12 ? month : day;
+
+  const date = new Date(`${year}-${String(finalMonth).padStart(2, "0")}-${String(finalDay).padStart(2, "0")}`);
+  return isNaN(date.getTime()) ? null : date;
 };
+
 
 // === PERIOD FILTER ===
 const filterByPeriod = (data, period) => {
