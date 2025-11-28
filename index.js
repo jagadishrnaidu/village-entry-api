@@ -1,3 +1,10 @@
+/**
+ * 🌿 Aiikya Village Analytics API
+ * For: Aiikya Village, Sarjapur
+ * Description: Real-time analytics API for Google Sheet form data (A–X columns)
+ * Version: 7.0
+ */
+
 import express from "express";
 import { google } from "googleapis";
 import cors from "cors";
@@ -9,257 +16,252 @@ app.use(express.json());
 const PORT = process.env.PORT || 8080;
 
 // === CONFIG ===
-const SHEET_ID = "1l1y6vdXj7rMWJwCx3dc3ku0HPrHvpJAx5lh21nJP5HA"; // Replace with your sheet ID
-const SHEET_NAME = "site visits"; // your tab name in the sheet
+const SHEET_ID = "1l1y6vdXj7rMWJwCx3dc3ku0HPrHvpJAx5lh21nJP5HA"; // Google Sheet ID
+const SHEET_NAME = "site visits"; // Tab name in the sheet
 
-// === Google Auth ===
+// === GOOGLE AUTH ===
 const auth = new google.auth.GoogleAuth({
   credentials: JSON.parse(process.env.GOOGLE_SERVICE_KEY),
   scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 });
 const sheets = google.sheets({ version: "v4", auth });
 
-// === Helpers ===
+// === HELPERS ===
+
+// Read sheet safely (A–X covers 24 columns)
 async function readSheet() {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
-    range: `${SHEET_NAME}!A:T`
+    range: `${SHEET_NAME}!A1:X`
   });
   const [headers, ...rows] = res.data.values || [];
-  return { headers, rows };
+  const cleanHeaders = headers.map(h => (h || "").trim());
+  return { headers: cleanHeaders, rows };
 }
 
-function toDate(value) {
-  if (!value) return null;
-  const parts = value.split(/[\/ :]/);
+// Dynamically find a column by header name
+function findColumn(headers, name) {
+  const idx = headers.findIndex(
+    h => h.toLowerCase().replace(/\s+/g, " ").trim() === name.toLowerCase().replace(/\s+/g, " ").trim()
+  );
+  return idx >= 0 ? idx : -1;
+}
+
+// Parse timestamp (handles DD/MM/YYYY and MM/DD/YYYY)
+function parseTimestamp(ts) {
+  if (!ts) return null;
+  const parts = ts.split(/[\/ :]/);
   if (parts.length < 3) return null;
-  const [d, m, y] = parts;
-  return new Date(`${y}-${m}-${d}`);
+  const [a, b, c] = parts;
+  let d;
+  if (parseInt(a) > 12) d = new Date(`${c}-${b}-${a}`);
+  else d = new Date(ts);
+  return isNaN(d.getTime()) ? null : d;
 }
 
-// === Simple Sentiment Analyzer ===
+// Simple sentiment classification
 function getSentiment(text) {
+  if (!text) return "Neutral";
   const t = text.toLowerCase();
-  if (!t) return "Neutral";
-  if (t.includes("interested") || t.includes("positive") || t.includes("good") || t.includes("booked")) return "Positive";
-  if (t.includes("follow") || t.includes("call") || t.includes("pending") || t.includes("waiting")) return "Follow-up Required";
+  if (t.includes("booked") || t.includes("interested") || t.includes("good") || t.includes("positive"))
+    return "Positive";
+  if (t.includes("follow") || t.includes("call") || t.includes("pending") || t.includes("waiting"))
+    return "Follow-up Required";
   return "Neutral";
 }
 
-// === Endpoints ===
+// === ROUTES ===
 
 // Health check
 app.get("/health", (req, res) => {
-  res.json({ status: "✅ Village Entry Form API running" });
+  res.json({ status: "✅ Aiikya Village Analytics API is live and healthy" });
 });
 
-// Today’s visitors
+// Verify headers (for debugging)
+app.get("/verify", async (req, res) => {
+  const { headers } = await readSheet();
+  res.json({ detected_headers: headers, total_columns: headers.length });
+});
+
+// Visitors today
 app.get("/visitors", async (req, res) => {
   try {
-    const { rows } = await readSheet();
+    const { headers, rows } = await readSheet();
+    const tsIndex = findColumn(headers, "Timestamp");
     const today = new Date().toLocaleDateString("en-GB");
-    const count = rows.filter(r => r[0]?.includes(today)).length;
-    res.json({ total_visitors_today: count, total_rows: rows.length });
+    const count = rows.filter(r => r[tsIndex]?.includes(today)).length;
+    res.json({ visitors_today: count, total_rows: rows.length });
   } catch (e) {
-    res.status(500).json({ error: "Failed to load visitors", details: e.message });
+    res.status(500).json({ error: e.message });
   }
 });
 
-// Period (custom days)
+// Visitors in custom period
 app.get("/period", async (req, res) => {
   try {
     const days = parseInt(req.query.days || "7");
-    const { rows } = await readSheet();
+    const { headers, rows } = await readSheet();
+    const tsIndex = findColumn(headers, "Timestamp");
     const now = new Date();
     const cutoff = new Date();
     cutoff.setDate(now.getDate() - days);
-    const filtered = rows.filter(r => {
-      const d = toDate(r[0]);
+    const valid = rows.filter(r => {
+      const d = parseTimestamp(r[tsIndex]);
       return d && d >= cutoff && d <= now;
     });
-    res.json({ days, count: filtered.length, total_rows: rows.length });
+    res.json({ range_days: days, visitors: valid.length });
   } catch (e) {
-    res.status(500).json({ error: "Failed to get period data" });
+    res.status(500).json({ error: e.message });
   }
 });
 
-// Salesperson analytics
+// Salesperson stats
 app.get("/salesperson", async (req, res) => {
   try {
     const { name } = req.query;
-    if (!name) return res.status(400).json({ error: "Missing name" });
-    const { rows } = await readSheet();
-    const spCol = 17;
-    const siteVisitCol = 16;
-    const count = rows.filter(r =>
-      (r[spCol] && r[spCol].toLowerCase().includes(name.toLowerCase())) ||
-      (r[siteVisitCol] && r[siteVisitCol].toLowerCase().includes(name.toLowerCase()))
-    ).length;
-    res.json({ salesperson: name, customers: count });
+    if (!name) return res.status(400).json({ error: "Missing salesperson name" });
+    const { headers, rows } = await readSheet();
+    const s1 = findColumn(headers, "Sales person");
+    const s2 = findColumn(headers, "Site Visit handled by");
+    const matches = rows.filter(r => {
+      const a = (r[s1] || "").toLowerCase();
+      const b = (r[s2] || "").toLowerCase();
+      return a.includes(name.toLowerCase()) || b.includes(name.toLowerCase());
+    });
+    res.json({ salesperson: name, handled_visitors: matches.length });
   } catch (e) {
-    res.status(500).json({ error: "Failed to get salesperson data" });
+    res.status(500).json({ error: e.message });
   }
 });
 
-// Compare salespeople
+// Compare all salespeople
 app.get("/compare", async (req, res) => {
   try {
-    const { rows } = await readSheet();
-    const spCol = 17;
+    const { headers, rows } = await readSheet();
+    const s1 = findColumn(headers, "Sales person");
+    const s2 = findColumn(headers, "Site Visit handled by");
     const stats = {};
     rows.forEach(r => {
-      const sp = r[spCol] || "Unassigned";
-      stats[sp] = (stats[sp] || 0) + 1;
+      const sp = r[s1] || r[s2] || "Unassigned";
+      if (sp) stats[sp] = (stats[sp] || 0) + 1;
     });
     res.json({
-      comparison: Object.entries(stats).map(([salesperson, customers]) => ({ salesperson, customers }))
+      leaderboard: Object.entries(stats).map(([salesperson, visitors]) => ({ salesperson, visitors }))
     });
   } catch (e) {
-    res.status(500).json({ error: "Failed to compare salespeople" });
+    res.status(500).json({ error: e.message });
   }
 });
 
-// Sources
+// Sources (Lead Origins)
 app.get("/sources", async (req, res) => {
   try {
-    const { rows } = await readSheet();
-    const srcCol = 8;
-    const result = {};
+    const { headers, rows } = await readSheet();
+    const src = findColumn(headers, "How did you come to Know about us");
+    const map = {};
     rows.forEach(r => {
-      const src = r[srcCol];
-      if (src) result[src] = (result[src] || 0) + 1;
+      const val = (r[src] || "").trim();
+      if (val) map[val] = (map[val] || 0) + 1;
     });
-    res.json({ sources: Object.entries(result).map(([label, count]) => ({ label, count })) });
+    res.json({ sources: Object.entries(map).map(([label, count]) => ({ label, count })) });
   } catch (e) {
-    res.status(500).json({ error: "Failed to get sources" });
+    res.status(500).json({ error: e.message });
   }
 });
 
 // Requirements
 app.get("/requirements", async (req, res) => {
   try {
-    const { rows } = await readSheet();
-    const reqCol = 6;
-    const data = {};
+    const { headers, rows } = await readSheet();
+    const reqCol = findColumn(headers, "Requirements");
+    const map = {};
     rows.forEach(r => {
-      const v = r[reqCol];
-      if (v) data[v] = (data[v] || 0) + 1;
+      const val = (r[reqCol] || "").trim();
+      if (val) map[val] = (map[val] || 0) + 1;
     });
-    res.json({ requirements: Object.entries(data).map(([label, count]) => ({ label, count })) });
+    res.json({ requirements: Object.entries(map).map(([label, count]) => ({ label, count })) });
   } catch (e) {
-    res.status(500).json({ error: "Failed to analyze requirements" });
+    res.status(500).json({ error: e.message });
   }
 });
 
 // Configurations
 app.get("/configurations", async (req, res) => {
   try {
-    const { rows } = await readSheet();
-    const cfgCol = 10;
-    const data = {};
+    const { headers, rows } = await readSheet();
+    const cfg = findColumn(headers, "Configurations");
+    const map = {};
     rows.forEach(r => {
-      const v = r[cfgCol];
-      if (v) data[v] = (data[v] || 0) + 1;
+      const val = (r[cfg] || "").trim();
+      if (val) map[val] = (map[val] || 0) + 1;
     });
-    res.json({ configurations: Object.entries(data).map(([label, count]) => ({ label, count })) });
+    res.json({ configurations: Object.entries(map).map(([label, count]) => ({ label, count })) });
   } catch (e) {
-    res.status(500).json({ error: "Failed to analyze configurations" });
+    res.status(500).json({ error: e.message });
   }
 });
 
-// Industries
-app.get("/industries", async (req, res) => {
-  try {
-    const { rows } = await readSheet();
-    const indCol = 12;
-    const data = {};
-    rows.forEach(r => {
-      const v = r[indCol];
-      if (v) data[v] = (data[v] || 0) + 1;
-    });
-    res.json({ industries: Object.entries(data).map(([label, count]) => ({ label, count })) });
-  } catch (e) {
-    res.status(500).json({ error: "Failed to get industries" });
-  }
-});
-
-// Income
-app.get("/income", async (req, res) => {
-  try {
-    const { rows } = await readSheet();
-    const incCol = 13;
-    const data = {};
-    rows.forEach(r => {
-      const v = r[incCol];
-      if (v) data[v] = (data[v] || 0) + 1;
-    });
-    res.json({ income_distribution: Object.entries(data).map(([label, count]) => ({ label, count })) });
-  } catch (e) {
-    res.status(500).json({ error: "Failed to get income data" });
-  }
-});
-
-// Remarks with sentiment
+// Remarks with Sentiment
 app.get("/remarks", async (req, res) => {
   try {
-    const { rows } = await readSheet();
-    const visitCol = 15, followUpCol = 19;
+    const { headers, rows } = await readSheet();
+    const remarkIndex = findColumn(headers, "site visit Remarks");
+    const followIndex = findColumn(headers, "Follow up remarks");
     const remarks = rows
-      .map(r => ({
-        name: r[2],
-        siteVisitRemarks: r[visitCol] || "",
-        followUp: r[followUpCol] || "",
-        sentiment: getSentiment(`${r[visitCol]} ${r[followUpCol]}`)
-      }))
-      .filter(r => r.siteVisitRemarks || r.followUp);
+      .map(r => {
+        const text = `${r[remarkIndex] || ""} ${r[followIndex] || ""}`.trim();
+        return { text, sentiment: getSentiment(text) };
+      })
+      .filter(r => r.text);
     const summary = {
       Positive: remarks.filter(r => r.sentiment === "Positive").length,
       "Follow-up Required": remarks.filter(r => r.sentiment === "Follow-up Required").length,
       Neutral: remarks.filter(r => r.sentiment === "Neutral").length
     };
-    res.json({ summary, remarks });
+    res.json({ total_remarks: remarks.length, summary });
   } catch (e) {
-    res.status(500).json({ error: "Failed to get remarks" });
+    res.status(500).json({ error: e.message });
   }
 });
 
-// Cross Analysis
+// Cross Analysis (Industry, Income, Config, Requirements)
 app.get("/cross", async (req, res) => {
   try {
-    const { rows } = await readSheet();
-    const indCol = 12, incCol = 13, cfgCol = 10, reqCol = 6;
+    const { headers, rows } = await readSheet();
+    const ind = findColumn(headers, "I am working in");
+    const inc = findColumn(headers, "Current annual income");
+    const cfg = findColumn(headers, "Configurations");
+    const reqCol = findColumn(headers, "Requirements");
     const results = {};
     rows.forEach(r => {
-      const industry = r[indCol] || "Unknown";
-      const income = r[incCol] || "Unknown";
-      const config = r[cfgCol] || "Unknown";
-      const req = r[reqCol] || "Unknown";
-      const key = `${industry}_${income}_${config}_${req}`;
+      const key = `${r[ind] || "Unknown Industry"} | ${r[inc] || "Unknown Income"} | ${r[cfg] || "Unknown Config"} | ${r[reqCol] || "Unknown Requirement"}`;
       results[key] = (results[key] || 0) + 1;
     });
-    res.json({
-      message: "Cross-analysis across industry, income, configuration, and requirement",
-      breakdown: Object.entries(results).map(([key, count]) => ({ key, count }))
-    });
+    res.json({ breakdown: Object.entries(results).map(([key, count]) => ({ key, count })) });
   } catch (e) {
-    res.status(500).json({ error: "Failed cross analysis" });
+    res.status(500).json({ error: e.message });
   }
 });
 
-// Full analytics summary
+// Full summary
 app.get("/analysis", async (req, res) => {
   try {
-    const { rows } = await readSheet();
+    const { headers, rows } = await readSheet();
+    const src = findColumn(headers, "How did you come to Know about us");
+    const cfg = findColumn(headers, "Configurations");
+    const ind = findColumn(headers, "I am working in");
+    const inc = findColumn(headers, "Current annual income");
     res.json({
-      total_rows: rows.length,
-      sources: [...new Set(rows.map(r => r[8]))].filter(Boolean),
-      configurations: [...new Set(rows.map(r => r[10]))].filter(Boolean),
-      industries: [...new Set(rows.map(r => r[12]))].filter(Boolean),
-      income_ranges: [...new Set(rows.map(r => r[13]))].filter(Boolean)
+      total_records: rows.length,
+      sources: [...new Set(rows.map(r => r[src]).filter(Boolean))],
+      configurations: [...new Set(rows.map(r => r[cfg]).filter(Boolean))],
+      industries: [...new Set(rows.map(r => r[ind]).filter(Boolean))],
+      income_ranges: [...new Set(rows.map(r => r[inc]).filter(Boolean))]
     });
   } catch (e) {
-    res.status(500).json({ error: "Failed full analysis" });
+    res.status(500).json({ error: e.message });
   }
 });
 
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+// Start server
+app.listen(PORT, () => console.log(`🚀 Aiikya Village Analytics API running on port ${PORT}`));
