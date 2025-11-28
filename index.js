@@ -3,180 +3,232 @@ import { google } from "googleapis";
 import cors from "cors";
 
 const app = express();
-app.use(cors());
-app.use(express.json());
 const PORT = process.env.PORT || 8080;
 
-const SHEET_ID = "1l1y6vdXj7rMWJwCx3dc3ku0HPrHvpJAx5lh21nJP5HA";
-const SHEET_NAME = "site visits";
+app.use(cors());
+app.use(express.json());
 
-const auth = new google.auth.GoogleAuth({
-  credentials: JSON.parse(process.env.GOOGLE_SERVICE_KEY),
-  scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"]
-});
-const sheets = google.sheets({ version: "v4", auth });
+// === CONFIG ===
+const SHEET_ID = process.env.SHEET_ID;
+const GOOGLE_SERVICE_KEY = process.env.GOOGLE_SERVICE_KEY;
+const SHEET_NAME = "site visits"; // Sheet/tab name
 
-// ---------- helpers ----------
-async function readSheet() {
-  const res = await sheets.spreadsheets.values.get({
+// === AUTH ===
+const getSheets = async () => {
+  const auth = new google.auth.GoogleAuth({
+    credentials: JSON.parse(GOOGLE_SERVICE_KEY),
+    scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
+  });
+  return google.sheets({ version: "v4", auth });
+};
+
+// === Read Data ===
+const getRows = async () => {
+  const sheets = await getSheets();
+  const result = await sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
-    range: `${SHEET_NAME}!A1:X`
+    range: `'${SHEET_NAME}'!A:X`,
   });
-  const [headers, ...rows] = res.data.values || [];
-  const cleanHeaders = headers.map(h => (h || "").trim());
-  const padded = rows.map(r => {
-    const row = [...r];
-    while (row.length < cleanHeaders.length) row.push("");
-    return row;
-  });
-  return { headers: cleanHeaders, rows: padded };
-}
-function findColumn(headers, name) {
-  return headers.findIndex(
-    h => h.toLowerCase().replace(/\s+/g, " ").trim() ===
-         name.toLowerCase().replace(/\s+/g, " ").trim()
+
+  const rows = result.data.values || [];
+  const headers = rows[0].map((h) => (h || "").trim());
+  return rows.slice(1).map((r) =>
+    Object.fromEntries(headers.map((h, i) => [h, (r[i] || "").trim()]))
   );
-}
-function parseTimestamp(ts) {
-  if (!ts) return null;
-  const parts = ts.split(/[\/ :]/);
-  if (parts.length < 3) return null;
-  const [a,b,c] = parts;
-  let d = parseInt(a) > 12 ? new Date(`${c}-${b}-${a}`) : new Date(ts);
-  return isNaN(d.getTime()) ? null : d;
-}
-function getMonthKey(d){return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;}
-function getSentiment(t){
-  if(!t) return "Neutral";
-  const s=t.toLowerCase();
-  if(/booked|positive|interested|good/.test(s)) return "Positive";
-  if(/follow|call|pending|waiting/.test(s)) return "Follow-up Required";
-  return "Neutral";
-}
+};
 
-// ---------- routes ----------
-app.get("/health",(req,res)=>res.json({status:"✅ Aiikya Analytics API Live"}));
-app.get("/verify",async(req,res)=>{
-  const {headers}=await readSheet();
-  res.json({headers,total_columns:headers.length});
+// === Date Parser ===
+const parseDate = (timestamp) => {
+  if (!timestamp) return null;
+  const [d, m, y] = timestamp.split(/[ /]/);
+  return new Date(`${y}-${m}-${d}`);
+};
+
+// === HELPERS ===
+const filterByPeriod = (data, period) => {
+  const now = new Date();
+  const oneWeekAgo = new Date();
+  oneWeekAgo.setDate(now.getDate() - 7);
+
+  return data.filter((r) => {
+    const d = parseDate(r.Timestamp);
+    if (!d) return false;
+
+    switch (period) {
+      case "today":
+        return (
+          d.getDate() === now.getDate() &&
+          d.getMonth() === now.getMonth() &&
+          d.getFullYear() === now.getFullYear()
+        );
+      case "this_week":
+        return d >= oneWeekAgo && d <= now;
+      case "this_month":
+        return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+      default:
+        return true;
+    }
+  });
+};
+
+// ✅ HEALTH CHECK
+app.get("/health", (req, res) => {
+  res.send("✅ Aiikya Village Entry API running fine!");
 });
 
-// social-source month filter
-app.get("/socialmedia",async(req,res)=>{
-  try{
-    const months=(req.query.months||"2025-10,2025-11").split(",");
-    const sourceName=req.query.source||"social media";
-    const {headers,rows}=await readSheet();
-    const tsIdx=findColumn(headers,"Timestamp");
-    const srcIdx=findColumn(headers,"How did you come to Know about us");
-    const handledIdx=findColumn(headers,"Site Visit handled by");
-    const salesIdx=findColumn(headers,"Sales person");
-    const incomeIdx=findColumn(headers,"Current annual income");
-    const remarkIdx=findColumn(headers,"site visit Remarks");
-    const followIdx=findColumn(headers,"Follow up remarks");
-
-    const data=[];
-    rows.forEach(r=>{
-      const src=(r[srcIdx]||"").toLowerCase();
-      if(!src.includes(sourceName.toLowerCase())) return;
-      const d=parseTimestamp(r[tsIdx]);
-      if(!d) return;
-      if(!months.includes(getMonthKey(d))) return;
-      data.push({
-        timestamp:r[tsIdx],
-        handler:(r[handledIdx]||"")+(r[salesIdx]?` / ${r[salesIdx]}`:""),
-        income:r[incomeIdx]||"Unknown",
-        remark:`${r[remarkIdx]} ${r[followIdx]}`.trim(),
-        sentiment:getSentiment(`${r[remarkIdx]} ${r[followIdx]}`)
-      });
-    });
-
-    const byHandler={};
-    const byIncome={};
-    const sentimentCount={Positive:0,"Follow-up Required":0,Neutral:0};
-
-    data.forEach(e=>{
-      const handlers=e.handler.split(/,|&|\//).map(x=>x.trim()).filter(Boolean);
-      handlers.forEach(h=>{byHandler[h]=(byHandler[h]||0)+1;});
-      byIncome[e.income]=(byIncome[e.income]||0)+1;
-      sentimentCount[e.sentiment]++;
-    });
-
-    res.json({
-      months,
-      source:sourceName,
-      total:data.length,
-      handlers:Object.entries(byHandler).map(([h,c])=>({handler:h,visits:c})),
-      income_breakdown:Object.entries(byIncome).map(([i,c])=>({income:i,count:c})),
-      sentiment_summary:sentimentCount,
-      remarks:data.map(e=>({timestamp:e.timestamp,handler:e.handler,income:e.income,remark:e.remark,sentiment:e.sentiment}))
-    });
-  }catch(e){res.status(500).json({error:e.message});}
+// ✅ VISITORS (today)
+app.get("/visitors", async (req, res) => {
+  try {
+    const data = await getRows();
+    const today = filterByPeriod(data, "today");
+    res.json({ total_visitors_today: today.length, total_rows: data.length });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to get today's visitors" });
+  }
 });
 
-// existing generic endpoints (period,sources,compare...) could remain here if needed
-// but are omitted for brevity—they work unchanged from v7.5
+// ✅ WEEKLY VISITORS
+app.get("/weekly", async (req, res) => {
+  try {
+    const data = await getRows();
+    const week = filterByPeriod(data, "this_week");
+    res.json({ total_visitors_week: week.length, total_rows: data.length });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to get weekly visitors" });
+  }
+});
 
-// ===================
-// SOCIAL MEDIA ANALYSIS
-// ===================
+// ✅ MONTHLY VISITORS
+app.get("/monthly", async (req, res) => {
+  try {
+    const { month } = req.query; // optional custom month YYYY-MM
+    const data = await getRows();
+
+    const results = data.filter((r) => {
+      const d = parseDate(r.Timestamp);
+      if (!d) return false;
+      const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      return month ? iso === month : iso === `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, "0")}`;
+    });
+
+    res.json({ month: month || "current", total_visitors: results.length });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to get monthly visitors" });
+  }
+});
+
+// ✅ SALESPERSON PERFORMANCE
+app.get("/salesperson", async (req, res) => {
+  try {
+    const { name, period } = req.query;
+    if (!name || !period) return res.status(400).json({ error: "Missing name or period" });
+
+    const data = await getRows();
+    const filtered = filterByPeriod(data, period).filter(
+      (r) =>
+        (r["Site Visit handled by"] || "").toLowerCase().includes(name.toLowerCase()) ||
+        (r["Sales person"] || "").toLowerCase().includes(name.toLowerCase())
+    );
+
+    res.json({ salesperson: name, period, customers: filtered.length });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to get salesperson data" });
+  }
+});
+
+// ✅ SOCIAL MEDIA ANALYSIS
 app.get("/socialmedia", async (req, res) => {
   try {
-    const { months = "", source = "Social Media" } = req.query; // e.g. ?months=2025-10,2025-11&source=Social Media
-    const targetMonths = months.split(",").map(m => m.trim());
-    const { headers, rows } = await readSheet();
+    const { months = "2025-10,2025-11", source = "Social Media" } = req.query;
+    const monthList = months.split(",");
+    const data = await getRows();
 
-    const tsIndex = findColumn(headers, "Timestamp");
-    const srcIndex = findColumn(headers, "How did you come to Know about us");
-    const handledByCol = findColumn(headers, "Site Visit handled by");
-    const salesCol = findColumn(headers, "Sales person");
-    const remarkCol = findColumn(headers, "site visit Remarks");
-    const incomeCol = findColumn(headers, "Current annual income");
-
-    const data = [];
-
-    rows.forEach(r => {
-      const ts = parseTimestamp(r[tsIndex]);
-      if (!ts || isNaN(ts)) return;
-      const iso = `${ts.getFullYear()}-${String(ts.getMonth() + 1).padStart(2, "0")}`;
-      if (!targetMonths.includes(iso)) return;
-
-      const src = (r[srcIndex] || "").toLowerCase();
-      if (!src.includes(source.toLowerCase())) return;
-
-      data.push({
-        timestamp: r[tsIndex],
-        handledBy: r[handledByCol] || "",
-        salesperson: r[salesCol] || "",
-        remark: r[remarkCol] || "",
-        income: r[incomeCol] || ""
-      });
+    const filtered = data.filter((r) => {
+      const d = parseDate(r.Timestamp);
+      if (!d) return false;
+      const monthIso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      const src = (r["How did you come to Know about us"] || "").toLowerCase();
+      return monthList.includes(monthIso) && src.includes(source.toLowerCase());
     });
 
-    const handlers = {};
-    const incomes = {};
+    // Handlers
+    const handlerCount = {};
+    const incomeBreakdown = {};
     const remarks = [];
 
-    data.forEach(d => {
-      const handlerName = `${d.handledBy} ${d.salesperson}`.trim() || "Unassigned";
-      handlers[handlerName] = (handlers[handlerName] || 0) + 1;
-      const income = d.income || "Unspecified";
-      incomes[income] = (incomes[income] || 0) + 1;
-      if (d.remark) remarks.push({ handler: handlerName, remark: d.remark });
+    filtered.forEach((r) => {
+      const handler = `${r["Site Visit handled by"] || ""} ${r["Sales person"] || ""}`.trim() || "Unassigned";
+      handlerCount[handler] = (handlerCount[handler] || 0) + 1;
+
+      const income = r["Current annual income"] || "Unspecified";
+      incomeBreakdown[income] = (incomeBreakdown[income] || 0) + 1;
+
+      if (r["site visit Remarks"]) {
+        remarks.push({
+          name: r["Name"] || "",
+          handler,
+          remark: r["site visit Remarks"],
+        });
+      }
     });
 
     res.json({
       source,
-      months: targetMonths,
-      total_visitors: data.length,
-      handlers: Object.entries(handlers).map(([handler, count]) => ({ handler, count })),
-      income_breakdown: Object.entries(incomes).map(([range, count]) => ({ range, count })),
-      remarks
+      months: monthList,
+      total_visitors: filtered.length,
+      handlers: Object.entries(handlerCount).map(([name, count]) => ({ name, count })),
+      income_breakdown: Object.entries(incomeBreakdown).map(([range, count]) => ({ range, count })),
+      remarks,
     });
   } catch (e) {
-    res.status(500).json({ error: "Failed to analyze social media visitors", details: e.message });
+    console.error(e);
+    res.status(500).json({ error: "Failed to analyze social media data" });
   }
 });
 
+// ✅ ANALYSIS (All Insights)
+app.get("/analysis", async (req, res) => {
+  try {
+    const data = await getRows();
 
-app.listen(PORT,()=>console.log(`🚀 Aiikya Analytics v8.0 running on port ${PORT}`));
+    const countBy = (key) => {
+      const counts = {};
+      data.forEach((r) => {
+        const val = (r[key] || "Unknown").trim();
+        counts[val] = (counts[val] || 0) + 1;
+      });
+      return Object.entries(counts)
+        .sort((a, b) => b[1] - a[1])
+        .map(([label, count]) => ({ label, count }));
+    };
+
+    res.json({
+      total_records: data.length,
+      sources: countBy("How did you come to Know about us"),
+      configurations: countBy("Configurations"),
+      industries: countBy("I am working in"),
+      income_distribution: countBy("Current annual income"),
+      remarks: data
+        .map((r) => ({
+          name: r["Name"],
+          handler: r["Site Visit handled by"],
+          remark: r["site visit Remarks"],
+        }))
+        .filter((r) => r.remark && r.remark.trim().length > 0),
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to fetch full analysis" });
+  }
+});
+
+// ✅ ROOT
+app.get("/", (req, res) => {
+  res.send("🌿 Aiikya Village Entry API is live. Endpoints: /health, /visitors, /weekly, /monthly, /salesperson, /socialmedia, /analysis");
+});
+
+app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
